@@ -1,16 +1,85 @@
 #include "../include/Solver.hpp"
+#include <iostream>
+#include <Eigen/Dense>
+#include <Eigen/Sparse>
+#include <algorithm>
 
-Solver::Solver(std::vector<Node>& node, double delx)
+InitialSolver::InitialSolver(std::vector<Node>& node, double delx)
     :nodes(node), dx(delx)
 {};
 
-double Solver::step(double dt, double current){
-    double dt_min = 1;
+double InitialSolver::qgen(double elec_res, double current){
+    return elec_res * current*current; // suppose cross sectional area = unity
+}
+
+double InitialSolver::qgen_base(double resistance, double current){
+    return resistance*current*current;
+}
+std::vector<double> InitialSolver::get_temps() const {
+    std::vector<double> temps;
+    temps.reserve(nodes.size());
+    for (const auto& n : nodes) {
+        temps.push_back(n.T);
+    }
+    return temps;
+}
+
+const std::vector<Node>& InitialSolver::get_nodes() const{
+    return nodes;
+}
+
+void InitialSolver::update_material_properties(){
     for (Node& n: nodes){
         n.k = n.mat.k_lookup.eval(n.T, n.idx_k);
         n.c = n.mat.cp_lookup.eval(n.T, n.idx_c);
         n.rho_e = n.mat.rho_elec_lookup.eval(n.T, n.idx_rho_e);
     }
+}
+
+ForwardEulerSolver::ForwardEulerSolver(std::vector<Node>& node, double delx) : InitialSolver(node, delx){}
+
+int ForwardEulerSolver::step(double dt, double current){
+    update_material_properties();
+
+    std::vector<double> T_old(nodes.size());
+    for (int i = 0; i < nodes.size(); i++){
+        T_old[i] = nodes[i].T;
+    }
+
+    for (int i=1; i <nodes.size() - 1; i++ ){
+        Node& n = nodes[i];
+
+        
+        if (n.fixed == false){
+            const Node& n_left = nodes[i-1];
+            const Node& n_right = nodes[i+1];
+            double k_left = 2*n_left.k*n.k/(n_left.k+n.k) ;
+            double k_right = 2*n_right.k*n.k/(n_right.k+n.k);
+            double left_flux = k_left*(T_old[i-1] - T_old[i])/dx;
+            double right_flux = k_right*(T_old[i+1] - T_old[i])/dx;
+            double scale = dt / (n.rho * n.c);
+            n.T = T_old[i] + scale*((left_flux + right_flux)/dx
+            + qgen(n.rho_e, current));
+        }
+
+    }
+    Node& n0 = nodes[0];
+    // We treat the bottom node as a simple resistor with set resistance 1 ohm.
+    if (!n0.fixed) {
+        double scale = dt/(n0.rho*n0.c);
+        n0.T = T_old[0] + scale*(n0.k*2.0*(T_old[1]-T_old[0])/(dx*dx) + qgen_base(1.0, current));
+    }
+    else{
+        n0.T = T_old[0];
+    }
+    nodes[nodes.size()-1].T = T_old[nodes.size()-1];
+    return 0;
+}
+
+
+double ForwardEulerSolver::step_dynamic(double dt, double current){
+    double dt_min = 1;
+    update_material_properties();
 
     std::vector<double> T_old(nodes.size());
     for (int i = 0; i < nodes.size(); i++){
@@ -52,22 +121,79 @@ double Solver::step(double dt, double current){
     return dt_min;
 }
 
-double qgen(double elec_res, double current){
-    return elec_res * current*current; // suppose cross sectional area = unity
-}
+CrankNicolsonSolver::CrankNicolsonSolver(std::vector<Node>& node, double delx) : InitialSolver(node, delx){}
 
-double qgen_base(double resistance, double current){
-    return resistance*current*current;
-}
-std::vector<double> Solver::get_temps() const {
-    std::vector<double> temps;
-    temps.reserve(nodes.size());
-    for (const auto& n : nodes) {
-        temps.push_back(n.T);
+int CrankNicolsonSolver::step(double dt, double current){
+    update_material_properties();
+    int num_nodes = nodes.size();
+    Eigen::SparseMatrix<double> A(num_nodes, num_nodes);
+    Eigen::SparseMatrix<double> B(num_nodes, num_nodes);
+    std::vector<Eigen::Triplet<double>> tripletsA;
+    std::vector<Eigen::Triplet<double>> tripletsB;
+    Eigen::VectorXd T_vec(num_nodes);
+    Eigen::VectorXd G(num_nodes);
+
+    for (int i=0; i<num_nodes; i++){
+        Node& n = nodes[i];
+        T_vec(i) = n.T;
+        if (n.fixed) {
+            tripletsA.emplace_back(Eigen::Triplet<double>(i, i, 1.0));
+            tripletsB.emplace_back(Eigen::Triplet<double>(i, i, 1.0));
+            G(i) = 0.0;
+        }
+        else{
+            double R = dt*n.k / (2*n.rho*n.c*dx*dx);
+            double factor = dt/(2*n.rho*n.c);
+            G(i) = factor*qgen(n.rho_e, current);
+
+            tripletsA.emplace_back(Eigen::Triplet<double>(i, i, 1 + 2*R));
+            tripletsB.emplace_back(Eigen::Triplet<double>(i, i, 1 - 2*R));
+            if (i > 0) {
+                tripletsA.emplace_back(Eigen::Triplet<double>(i, i-1, -R));
+                tripletsB.emplace_back(Eigen::Triplet<double>(i, i-1, R));
+            }
+            if (i < num_nodes-1) {
+                tripletsA.emplace_back(Eigen::Triplet<double>(i, i+1, -R));
+                tripletsB.emplace_back(Eigen::Triplet<double>(i, i+1, R));
+            }
+        }
+
     }
-    return temps;
+
+    /*
+    int node_final = num_nodes-1;
+    tripletsA.push_back(Eigen::Triplet<double>(node_final, node_final, 1.0));
+    tripletsB.push_back(Eigen::Triplet<double>(node_final, node_final, 1.0));
+    G(node_final) = 0.0;
+    T_vec(node_final) = nodes[node_final].T; // this is how i deal with fixed nodes, skeptical
+    */ 
+
+    A.setFromTriplets(tripletsA.begin(), tripletsA.end());
+    B.setFromTriplets(tripletsB.begin(), tripletsB.end());
+    Eigen::VectorXd b_RHS = B*T_vec + G;
+    Eigen::SparseLU<Eigen::SparseMatrix<double>> solver;
+
+    solver.compute(A);
+    if(solver.info() != Eigen::Success) {
+        std::cerr << "Decomposition failed!" << std::endl;
+        return 1;
+    }
+
+    Eigen::VectorXd T_new = solver.solve(b_RHS);
+    if(solver.info() != Eigen::Success) {
+        std::cerr << "Solving failed!" << std::endl;
+        return 1;
+    }
+
+    for (int i=0; i<num_nodes-1; i++){
+        Node& n = nodes[i];
+        n.T = T_new[i];
+    }
+    T_new[num_nodes-1] = 300.0;
+
+    return 0;
 }
 
-const std::vector<Node>& Solver::get_nodes() const{
-    return nodes;
+double CrankNicolsonSolver::step_dynamic(double dt, double current){
+    throw std::runtime_error("Error: Not yet implemented");
 }
