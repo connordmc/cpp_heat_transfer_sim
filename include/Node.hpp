@@ -5,7 +5,7 @@
 
 struct Node{
     Node(double T, const Material& mat, bool fixed);
-    Node(double T, const Material& mat, bool fixed, double power);
+    Node(double T, const Material& mat, bool fixed, double power, double goal_temp);
     double T;
 
     const Material& mat;

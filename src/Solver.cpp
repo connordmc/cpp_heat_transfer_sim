@@ -124,6 +124,7 @@ double ForwardEulerSolver::step_dynamic(double dt, double current){
 CrankNicolsonSolver::CrankNicolsonSolver(std::vector<Node>& node, double delx) : InitialSolver(node, delx){}
 
 int CrankNicolsonSolver::step(double dt, double current){
+    double cross_sectional_area = 0.0005*0.0005*3.14159; // 1 mm diameter
     update_material_properties();
     int num_nodes = nodes.size();
     Eigen::SparseMatrix<double> A(num_nodes, num_nodes);
@@ -136,15 +137,26 @@ int CrankNicolsonSolver::step(double dt, double current){
     for (int i=0; i<num_nodes; i++){
         Node& n = nodes[i];
         T_vec(i) = n.T;
-        if (n.fixed) {
+        double factor = dt/(n.rho*n.c*cross_sectional_area*dx);
+        if (i == num_nodes-1){
             tripletsA.emplace_back(Eigen::Triplet<double>(i, i, 1.0));
             tripletsB.emplace_back(Eigen::Triplet<double>(i, i, 1.0));
             G(i) = 0.0;
         }
         else{
             double R = dt*n.k / (2*n.rho*n.c*dx*dx);
-            double factor = dt/(2*n.rho*n.c);
-            G(i) = factor*qgen(n.rho_e, current);
+            if (n.fixed) {
+                if (n.T > n.fixed_temp){
+                    G(i) = factor*(qgen(n.rho_e, current) - n.max_power);
+                }
+                else{
+                    G(i) = 0.0;
+                }
+            }
+            else{
+                G(i) = factor*qgen(n.rho_e, current);
+            }
+            G(0) = factor*(qgen_base(1, current));
 
             tripletsA.emplace_back(Eigen::Triplet<double>(i, i, 1 + 2*R));
             tripletsB.emplace_back(Eigen::Triplet<double>(i, i, 1 - 2*R));
@@ -159,15 +171,6 @@ int CrankNicolsonSolver::step(double dt, double current){
         }
 
     }
-
-    /*
-    int node_final = num_nodes-1;
-    tripletsA.push_back(Eigen::Triplet<double>(node_final, node_final, 1.0));
-    tripletsB.push_back(Eigen::Triplet<double>(node_final, node_final, 1.0));
-    G(node_final) = 0.0;
-    T_vec(node_final) = nodes[node_final].T; // this is how i deal with fixed nodes, skeptical
-    */ 
-
     A.setFromTriplets(tripletsA.begin(), tripletsA.end());
     B.setFromTriplets(tripletsB.begin(), tripletsB.end());
     Eigen::VectorXd b_RHS = B*T_vec + G;
@@ -189,8 +192,7 @@ int CrankNicolsonSolver::step(double dt, double current){
         Node& n = nodes[i];
         n.T = T_new[i];
     }
-    T_new[num_nodes-1] = 300.0;
-
+    nodes[num_nodes-1].T = 300.0; // The outside, infinite drain
     return 0;
 }
 

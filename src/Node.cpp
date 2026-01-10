@@ -11,7 +11,7 @@ Node::Node(double Temp, const Material& m, bool fixed)
       max_power(0.0)
 {}
 
-Node::Node(double Temp, const Material& m, bool fixed, double power)
+Node::Node(double Temp, const Material& m, bool fixed, double power, double goal_temp)
     : T(Temp),
       mat(m),
       idx_k(0),
@@ -19,7 +19,8 @@ Node::Node(double Temp, const Material& m, bool fixed, double power)
       idx_c(0),
       rho(m.rho),
       fixed(fixed),
-      max_power(power)
+      max_power(power),
+      fixed_temp(goal_temp)
 {}
 
 void Node::add_max_power(double power){
