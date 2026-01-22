@@ -12,11 +12,11 @@ class InitialSolver{
     virtual int step(double dt, double current) = 0;
     std::vector<double> get_temps() const;
     const std::vector<Node>& get_nodes() const;
+    void update_material_properties();
 
     protected:
     double dx;
     std::vector<Node> nodes;
-    void update_material_properties();
     double qgen(double elec_res, double current);
     double qgen_base(double resistance, double current);
 };
@@ -33,7 +33,7 @@ class CrankNicolsonSolver : public InitialSolver{
     CrankNicolsonSolver(std::vector<Node>& node, double delx);
     int step(double dt, double current) override;
     double step_dynamic(double dt, double current) override; //Temporary, will implement later.
-
+    MaterialNextState compute_gamma_at_node(Node& node, double dT);
 };
 
 #endif

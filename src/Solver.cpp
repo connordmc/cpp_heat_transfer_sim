@@ -3,6 +3,7 @@
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
 #include <algorithm>
+#include <cmath>
 
 InitialSolver::InitialSolver(std::vector<Node>& node, double delx)
     :nodes(node), dx(delx)
@@ -131,40 +132,61 @@ int CrankNicolsonSolver::step(double dt, double current){
     Eigen::SparseMatrix<double> B(num_nodes, num_nodes);
     std::vector<Eigen::Triplet<double>> tripletsA;
     std::vector<Eigen::Triplet<double>> tripletsB;
-    Eigen::VectorXd T_vec(num_nodes);
-    Eigen::VectorXd G(num_nodes);
+    Eigen::VectorXd T_vec = Eigen::VectorXd::Zero(num_nodes);
+    Eigen::VectorXd G = Eigen::VectorXd::Zero(num_nodes);
+    Eigen::VectorXd Jacob = Eigen::VectorXd::Zero(num_nodes);
+    double dTemp = 0.005;
+    double Gp, Gn;
+    double Jmax = 10/dt;
+    double resistor_length = 0.003;
 
     for (int i=0; i<num_nodes; i++){
         Node& n = nodes[i];
         T_vec(i) = n.T;
+        MaterialNextState next_vals = compute_gamma_at_node(n, dTemp);
         double factor = dt/(n.rho*n.c*cross_sectional_area*dx);
+        double next_factor = dt/(n.rho*next_vals.next_cp*cross_sectional_area*dx);
+        double prev_factor = dt/(n.rho*next_vals.prev_cp*cross_sectional_area*dx);
+        double R = dt*n.k / (2*n.rho*n.c*dx*dx);
         if (i == num_nodes-1){
             tripletsA.emplace_back(Eigen::Triplet<double>(i, i, 1.0));
+            //tripletsB.emplace_back(Eigen::Triplet<double>(i, i, 1.0));
+            G(i) = 300.0;
+            continue;
+        }
+        
+        else if (i==0){
+            tripletsA.emplace_back(Eigen::Triplet<double>(i, i, 1 + 2*R));
             tripletsB.emplace_back(Eigen::Triplet<double>(i, i, 1.0));
-            G(i) = 0.0;
+            G(i) = factor*qgen_base(1, current);
+            Jacob(i) = 0.0;
         }
         else{
-            double R = dt*n.k / (2*n.rho*n.c*dx*dx);
+
             if (n.fixed) {
-                if (n.T > n.fixed_temp){
-                    G(i) = factor*(qgen(n.rho_e, current) - n.max_power);
-                }
-                else{
-                    G(i) = 0.0;
-                }
+                double temp_differential = n.T - n.fixed_temp;
+                double smoothing = dx *100* (std::tanh(temp_differential/10));
+                G(i) = factor*(qgen(n.rho_e, current) - smoothing*n.max_power);
+                Gp = prev_factor*(qgen(next_vals.prev_rho_e, current) - smoothing*n.max_power);
+                Gn = next_factor*(qgen(next_vals.next_rho_e, current) - smoothing*n.max_power);
             }
             else{
                 G(i) = factor*qgen(n.rho_e, current);
+                Gp = prev_factor*(qgen(next_vals.prev_rho_e, current));
+                Gn = next_factor*(qgen(next_vals.next_rho_e, current));
             }
-            G(0) = factor*(qgen_base(1, current));
+            if (i == num_nodes -2){
+                G(i) += 600*R;
+            }
+            Jacob(i) = std::clamp((Gn - Gp) / (2*dTemp), -Jmax, Jmax);
 
-            tripletsA.emplace_back(Eigen::Triplet<double>(i, i, 1 + 2*R));
+            tripletsA.emplace_back(Eigen::Triplet<double>(i, i, 1 + 2*R + Jacob(i)));
             tripletsB.emplace_back(Eigen::Triplet<double>(i, i, 1 - 2*R));
             if (i > 0) {
                 tripletsA.emplace_back(Eigen::Triplet<double>(i, i-1, -R));
                 tripletsB.emplace_back(Eigen::Triplet<double>(i, i-1, R));
             }
-            if (i < num_nodes-1) {
+            if (i < num_nodes-2) {
                 tripletsA.emplace_back(Eigen::Triplet<double>(i, i+1, -R));
                 tripletsB.emplace_back(Eigen::Triplet<double>(i, i+1, R));
             }
@@ -173,18 +195,18 @@ int CrankNicolsonSolver::step(double dt, double current){
     }
     A.setFromTriplets(tripletsA.begin(), tripletsA.end());
     B.setFromTriplets(tripletsB.begin(), tripletsB.end());
-    Eigen::VectorXd b_RHS = B*T_vec + G;
+    Eigen::VectorXd b_RHS = B*T_vec + G + Jacob.cwiseProduct(T_vec);
     Eigen::SparseLU<Eigen::SparseMatrix<double>> solver;
 
     solver.compute(A);
     if(solver.info() != Eigen::Success) {
-        std::cerr << "Decomposition failed!" << std::endl;
+        std::cerr << "Decomposition failed" << std::endl;
         return 1;
     }
 
     Eigen::VectorXd T_new = solver.solve(b_RHS);
     if(solver.info() != Eigen::Success) {
-        std::cerr << "Solving failed!" << std::endl;
+        std::cerr << "Solving failed" << std::endl;
         return 1;
     }
 
@@ -198,4 +220,18 @@ int CrankNicolsonSolver::step(double dt, double current){
 
 double CrankNicolsonSolver::step_dynamic(double dt, double current){
     throw std::runtime_error("Error: Not yet implemented");
+}
+
+MaterialNextState CrankNicolsonSolver::compute_gamma_at_node(Node& node, double dT){
+    /*
+    Returns a vector of the form <rho_e +1, c_p +1, rho_e -1, c_p -1>
+    */
+    const Material& mat = node.mat;
+    MaterialNextState next_state;
+    double T = node.T;
+    next_state.next_rho_e = mat.rho_elec_lookup.eval(T + dT, node.idx_rho_e);
+    next_state.next_cp = mat.cp_lookup.eval(T + dT, node.idx_c);
+    next_state.prev_rho_e = mat.rho_elec_lookup.eval(T - dT, node.idx_rho_e);
+    next_state.prev_cp = mat.cp_lookup.eval(T - dT, node.idx_c);
+    return next_state;
 }

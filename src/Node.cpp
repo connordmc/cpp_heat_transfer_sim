@@ -30,3 +30,6 @@ void Node::add_max_power(double power){
   max_power = power;
 }
 
+Plate::Plate(double x_center, double thickness, double initial_temp, double max_power):
+  x_center(x_center), thickness(thickness), initial_temp(initial_temp), max_power(max_power){}
+

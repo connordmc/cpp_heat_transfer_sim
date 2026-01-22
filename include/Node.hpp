@@ -17,4 +17,12 @@ struct Node{
 
     void add_max_power(double power);
 };
+
+struct Plate{
+    Plate(double x_center, double thickness, double initial_temp, double max_power);
+    double x_center;
+    double thickness;
+    double initial_temp;
+    double max_power;
+};
 #endif
